@@ -45,8 +45,14 @@ fi
 if [[ -z "$TORCH_PACKAGE_NAME" ]]; then
     TORCH_PACKAGE_NAME='torch'
 fi
+
+if [[ -z "$TORCH_NO_PYTHON_PACKAGE_NAME" ]]; then
+    TORCH_NO_PYTHON_PACKAGE_NAME='torch_no_python'
+fi
+
 TORCH_PACKAGE_NAME="$(echo $TORCH_PACKAGE_NAME | tr '-' '_')"
-echo "Expecting the built wheels to all be called '$TORCH_PACKAGE_NAME'"
+TORCH_NO_PYTHON_PACKAGE_NAME="$(echo $TORCH_NO_PYTHON_PACKAGE_NAME | tr '-' '_')"
+echo "Expecting the built wheels to all be called '$TORCH_PACKAGE_NAME' or '$TORCH_NO_PYTHON_PACKAGE_NAME'"
 
 # Version: setup.py uses $PYTORCH_BUILD_VERSION.post$PYTORCH_BUILD_NUMBER if
 # PYTORCH_BUILD_NUMBER > 1
@@ -160,11 +166,29 @@ else
 fi
 
 echo "Calling setup.py bdist at $(date)"
-time CMAKE_ARGS=${CMAKE_ARGS[@]} \
-    EXTRA_CAFFE2_CMAKE_FLAGS=${EXTRA_CAFFE2_CMAKE_FLAGS[@]} \
+
+if [[ "$USE_SPLIT_BUILD" == "true" ]]; then
+    echo "Calling setup.py bdist_wheel for split build (BUILD_LIBTORCH_WHL)"
+    time EXTRA_CAFFE2_CMAKE_FLAGS=${EXTRA_CAFFE2_CMAKE_FLAGS[@]} \
+    BUILD_LIBTORCH_WHL=1 BUILD_PYTHON_ONLY=0 \
     BUILD_LIBTORCH_CPU_WITH_DEBUG=$BUILD_DEBUG_INFO \
     USE_NCCL=${USE_NCCL} USE_RCCL=${USE_RCCL} USE_KINETO=${USE_KINETO} \
     python setup.py bdist_wheel -d /tmp/$WHEELHOUSE_DIR
+    echo "Finished setup.py bdist_wheel for split build (BUILD_LIBTORCH_WHL)"
+    echo "Calling setup.py bdist_wheel for split build (BUILD_PYTHON_ONLY)"
+    time EXTRA_CAFFE2_CMAKE_FLAGS=${EXTRA_CAFFE2_CMAKE_FLAGS[@]} \
+    BUILD_LIBTORCH_WHL=0 BUILD_PYTHON_ONLY=1 \
+    BUILD_LIBTORCH_CPU_WITH_DEBUG=$BUILD_DEBUG_INFO \
+    USE_NCCL=${USE_NCCL} USE_RCCL=${USE_RCCL} USE_KINETO=${USE_KINETO} \
+    python setup.py bdist_wheel -d /tmp/$WHEELHOUSE_DIR --cmake
+    echo "Finished setup.py bdist_wheel for split build (BUILD_PYTHON_ONLY)"
+else
+    time CMAKE_ARGS=${CMAKE_ARGS[@]} \
+        EXTRA_CAFFE2_CMAKE_FLAGS=${EXTRA_CAFFE2_CMAKE_FLAGS[@]} \
+        BUILD_LIBTORCH_CPU_WITH_DEBUG=$BUILD_DEBUG_INFO \
+        USE_NCCL=${USE_NCCL} USE_RCCL=${USE_RCCL} USE_KINETO=${USE_KINETO} \
+        python setup.py bdist_wheel -d /tmp/$WHEELHOUSE_DIR
+fi
 echo "Finished setup.py bdist at $(date)"
 
 # Build libtorch packages
@@ -282,6 +306,8 @@ echo 'Built this wheel:'
 ls /tmp/$WHEELHOUSE_DIR
 mkdir -p "/$WHEELHOUSE_DIR"
 mv /tmp/$WHEELHOUSE_DIR/torch*linux*.whl /$WHEELHOUSE_DIR/
+mv /tmp/$WHEELHOUSE_DIR/torch_no_python*.whl /$WHEELHOUSE_DIR/ || true
+
 if [[ -n "$BUILD_PYTHONLESS" ]]; then
     mkdir -p /$LIBTORCH_HOUSE_DIR
     mv /tmp/$LIBTORCH_HOUSE_DIR/*.zip /$LIBTORCH_HOUSE_DIR
@@ -292,7 +318,7 @@ rm -rf /tmp_dir
 mkdir /tmp_dir
 pushd /tmp_dir
 
-for pkg in /$WHEELHOUSE_DIR/torch*linux*.whl /$LIBTORCH_HOUSE_DIR/libtorch*.zip; do
+for pkg in /$WHEELHOUSE_DIR/torch*linux*.whl /$WHEELHOUSE_DIR/torch_no_python*.whl /$LIBTORCH_HOUSE_DIR/libtorch*.zip; do
 
     # if the glob didn't match anything
     if [[ ! -e $pkg ]]; then
@@ -408,6 +434,14 @@ for pkg in /$WHEELHOUSE_DIR/torch*linux*.whl /$LIBTORCH_HOUSE_DIR/libtorch*.zip;
         popd
     fi
 
+    # @sahanp todo: Remove this line
+    echo "current files in directory"
+    ls -l
+
+    echo "removing extraneous .so and .a files"
+    # todo @PaliC: Remove these .so and .a files before hand in the split build
+    rm *.so *.a || true
+
     # zip up the wheel back
     zip -rq $(basename $pkg) $PREIX*
 
@@ -441,7 +475,9 @@ if [[ -z "$BUILD_PYTHONLESS" ]]; then
   pushd $PYTORCH_ROOT/test
 
   # Install the wheel for this Python version
+  pip uninstall -y "$TORCH_NO_PYTHON_PACKAGE_NAME" || true
   pip uninstall -y "$TORCH_PACKAGE_NAME"
+  pip install "$TORCH_NO_PYTHON_PACKAGE_NAME" --no-index -f /$WHEELHOUSE_DIR --no-dependencies -v || true
   pip install "$TORCH_PACKAGE_NAME" --no-index -f /$WHEELHOUSE_DIR --no-dependencies -v
 
   # Print info on the libraries installed in this wheel
